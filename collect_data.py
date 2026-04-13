@@ -41,11 +41,6 @@ KEYWORDS = [
     "crow", "pigeon", "sparrow", "duck", "chicken", "goose",
 ]
 
-slot_pool = None
-index = 0
-keyword = ''
-count = 1
-
 def _search_top_page(keyword: str) -> str | None:
     resp = requests.get(WIKI_API, headers=HEADERS, params={
         "action": "query", "list": "search",
@@ -86,26 +81,27 @@ def _resolve_image_urls(filenames: list[str]) -> list[str]:
     return urls
 
 
-def fetch_images(keyword: str, index: int = 0, count: int = 3) -> list[Image.Image]:
+def get_image_urls(keyword: str) -> list[str]:
+    """Resolve all image URLs from the top Wikipedia article (no downloads)."""
     page_title = _search_top_page(keyword)
     if not page_title:
         return []
     print(f"  Wikipedia article: {page_title}")
     filenames = _get_image_filenames(page_title)
-    urls = _resolve_image_urls(filenames)[index:index+count]
-    images = []
-    for i, url in enumerate(urls):
-        if i > 0:
-            time.sleep(0.5)
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-            resp.raise_for_status()
-            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-            images.append(img)
-            print(f"  Fetched {len(images)}/{len(urls)}")
-        except Exception as e:
-            print(f"  Skipped image {i + 1}: {e}")
-    return images
+    urls = _resolve_image_urls(filenames)
+    print(f"  Found {len(urls)} images")
+    return urls
+
+
+def download_image(url: str) -> np.ndarray | None:
+    """Download a single image and return it as a numpy array."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+    except Exception as e:
+        print(f"  Skipped ({e})")
+        return None
 
 
 # --- Mask drawing ------------------------------------------------------------
@@ -186,15 +182,34 @@ def draw_mask(
 # --- Main data collection loop -----------------------------------------------
 
 def collect_sample(keyword: str, output_dir: str):
-    global slot_pool, index
+    print(f"\nLooking up '{keyword}' on Wikipedia...")
+    urls = get_image_urls(keyword)
 
-    print(f"\nFetching images for '{keyword}'...")
-    pool = fetch_images(keyword, count=count)
-    index += count
-    if len(pool) < count:
-        print(f"Only found {len(pool)} images (need at least {count}). Try a different keyword.")
+    # Shared cursor — each call to next_image() advances it, whether it's the
+    # initial load or a middle-click swap
+    cursor = [0]
+
+    def next_image() -> np.ndarray | None:
+        while cursor[0] < len(urls):
+            url = urls[cursor[0]]
+            cursor[0] += 1
+            img = download_image(url)
+            if img is not None:
+                return img
+        print("  No more images available.")
+        return None
+
+    # Download the first 1 image up front
+    initial = []
+    while len(initial) < 1:
+        img = next_image()
+        if img is None:
+            break
+        initial.append(img)
+
+    if len(initial) < 1:
+        print(f"Only found {len(initial)} images (need 3). Try a different keyword.")
         return
-    print(f"  Pool: {len(pool)} images available")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     sample_dir = os.path.join(output_dir, f"{keyword.replace(' ', '_')}_{timestamp}")
@@ -204,32 +219,13 @@ def collect_sample(keyword: str, output_dir: str):
         f.write(keyword)
 
     steps = [
-        # (filename_stem, display_label, zero_outside_mask)
         ("target",      "Image 1 — Target example",      True),
         ("anti_target", "Image 2 — Anti-target example", True),
         ("result",      "Image 3 — Result image",        False),
     ]
 
-    for slot_idx, (stem, label, zero_outside) in enumerate(steps):
-        # Each slot starts at its assigned image and can cycle forward through the pool
-        slot_pool = [np.array(img) for img in pool[slot_idx:]]
-        cursor = [0]
-
-        def get_replacement(c=cursor):
-            global slot_pool, index
-            c[0] += 1
-            # get more images if needed
-            if c[0] >= len(slot_pool):
-                new_images = fetch_images(keyword, index=index, count=count)
-                index += count
-                slot_pool.extend([np.array(img) for img in new_images])
-                if c[0] >= len(slot_pool):
-                    c[0] = 0
-
-            print(f"  Swapped to image {slot_idx + 1 + c[0]} from pool")
-            return slot_pool[c[0]]
-
-        final_arr, mask = draw_mask(slot_pool[0], label, get_replacement=get_replacement)
+    for (stem, label, zero_outside), img in zip(steps, initial):
+        final_arr, mask = draw_mask(img, label, get_replacement=next_image)
 
         if zero_outside:
             out = final_arr.copy()
@@ -242,13 +238,12 @@ def collect_sample(keyword: str, output_dir: str):
             print(f"  Saved {stem}.jpg + {stem}_mask.png")
 
     print(f"\nSample saved to: {sample_dir}/")
-    slot_pool.clear()
-    index = 0
 
 
 if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     
+    keyword = ""
     while keyword != "done":
         keyword = input("Keyword: ")
         collect_sample(keyword, output_dir)
