@@ -374,8 +374,70 @@ def collect_from_url(start_url: str, output_dir: str):
 
 
 def collect_from_folder(folder: str, output_dir: str):
-    pass
+    header(f"Starting from folder: {folder}")
+    if not os.path.exists(folder) or not os.path.isdir(folder):
+        error(f"Folder not found: {folder}")
+        return None
 
+    # gather image files
+    exts = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+    files = [os.path.join(folder, f) for f in sorted(os.listdir(folder)) if os.path.splitext(f)[1].lower() in exts]
+    if not files:
+        warn("No image files found in the folder.")
+        return None
+    dim(f"Found {len(files)} images in folder.")
+
+    cursor = [0]
+    def next_image():
+        # behave similarly to collect_from_url: wrap to start and warn when exhausted
+        if cursor[0] >= len(files):
+            cursor[0] = 0
+            warn("No more images available in this folder.")
+
+        while cursor[0] < len(files):
+            path = files[cursor[0]]
+            cursor[0] += 1
+            try:
+                img = np.array(Image.open(path).convert("RGB"))
+                return img
+            except Exception as e:
+                warn(f"  Failed to load {path}: {e}")
+                continue
+        return None
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = os.path.basename(os.path.normpath(folder)).replace(".", "_")
+    sample_dir = os.path.join(output_dir, f"{safe_name}_{timestamp}")
+    os.makedirs(sample_dir, exist_ok=True)
+    with open(os.path.join(sample_dir, "source_folder.txt"), "w") as f:
+        f.write(folder)
+
+    steps = [
+        ("target", True, "Image 1 — Target example"),
+        ("anti_target", True, "Image 2 — Anti-target example"),
+        ("result", False, "Image 3 — Result image"),
+    ]
+
+    for stem, zero_outside, title in steps:
+        img = next_image()
+        if img is None:
+            error("Ran out of images while collecting a sample.")
+            return sample_dir
+        final_arr, mask = draw_mask(img, title, get_replacement=next_image)
+        final_fixed = _fit_and_pad_to_target(final_arr)
+        mask_fixed = _fit_and_pad_mask(mask)
+        if zero_outside:
+            out = final_fixed.copy()
+            out[mask_fixed == 0] = 0
+            Image.fromarray(out).save(os.path.join(sample_dir, f"{stem}.jpg"))
+            success(f"  Saved {stem}.jpg")
+        else:
+            Image.fromarray(final_fixed).save(os.path.join(sample_dir, f"{stem}.jpg"))
+            Image.fromarray((mask_fixed * 255).astype(np.uint8)).save(os.path.join(sample_dir, f"{stem}_mask.png"))
+            success(f"  Saved {stem}.jpg + {stem}_mask.png")
+
+    # No links to return when collecting from a folder; return empty list
+    return sample_dir, []
 
 def choose_from_list(prompt: str, max_items: int):
     while True:
