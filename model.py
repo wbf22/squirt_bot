@@ -20,6 +20,15 @@ class TargetDetector(nn.Module):
     def __init__(self):
 
         """
+        So we'll feed in do and don't images to convolutions
+
+        subtract the embeddings from each other to get the semantic difference.
+        feed that into the model with the do embedding
+        """
+
+
+
+        """
         CONVOLUTIONS
         - image is converted into useful features
         - target example images are converted into useful features
@@ -175,21 +184,27 @@ class TargetDetector(nn.Module):
 
         p3 = self.lat_p3(p3) # [BATCH, W, H, EMBED_DIM_HALF]
 
-        return torch.cat([p5, p3], dim=3)
+        return torch.cat([p5, p3], dim=3) # [BATCH, W, H, EMBED_DIM]
 
     def forward(
         self, 
-        input_image, # [BATCH, 1920, 1080, 3]
-        queries # [BATCH, CONV_WIDTH*CONV_HEIGHT*num_examples, EMBED_DIM] (result of convolutions, the concatted in dim 1 with other examples)
+        input_image, # [BATCH, 3, 1920, 1080]
+        examples, # [BATCH, CONV_WIDTH*CONV_HEIGHT*num_examples, EMBED_DIM] (result of convolutions, the concatted in dim 1 with other examples)
+        anti_examples # [BATCH, CONV_WIDTH*CONV_HEIGHT*num_examples, EMBED_DIM] (result of convolutions, the concatted in dim 1 with other examples)
     ):
 
         # CONVOLUTIONS
         x = self.convolutions(input_image)
 
         # ATTENTION
+        x += self.pos_embed
+        examples += self.pos_embed # maybe duplicate to be the same as examples size
+        anti_examples += self.pos_embed # maybe duplicate to be the same as examples size
+        diff = examples - anti_examples
+        key = torch.cat([examples, diff], dim=1)
+        out, attn_weights = self.mha(query=x, key=key, value=key) # Cross attention 
 
-        # Cross attention 
-        out, attn_weights = self.mha(query=queries, key=x, value=x)
+        # MASK CREATION
 
-        
+
 

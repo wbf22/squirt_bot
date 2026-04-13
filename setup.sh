@@ -1,3 +1,3 @@
 python3 -m venv venv
 source venv/bin/activate
-python3 -m pip install torch torchvision torchaudio
+pip3 install torch torchvision torchaudio duckduckgo_search requests matplotlib
