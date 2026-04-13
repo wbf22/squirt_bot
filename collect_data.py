@@ -31,6 +31,24 @@ import matplotlib.pyplot as plt
 from matplotlib.path import Path
 
 
+# --- Colors ------------------------------------------------------------------
+
+R = "\033[0m"           # reset
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+def info(msg):    print(f"{CYAN}{msg}{R}")
+def dim(msg):     print(f"{DIM}{msg}{R}")
+def success(msg): print(f"{GREEN}{msg}{R}")
+def warn(msg):    print(f"{YELLOW}{msg}{R}")
+def error(msg):   print(f"{RED}{msg}{R}")
+def header(msg):  print(f"\n{BOLD}{CYAN}{msg}{R}")
+
+
 # --- Wikipedia fetch (same as collect_images.py) ----------------------------
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
@@ -86,10 +104,10 @@ def get_image_urls(keyword: str) -> list[str]:
     page_title = _search_top_page(keyword)
     if not page_title:
         return []
-    print(f"  Wikipedia article: {page_title}")
+    info(f"  Wikipedia article: {page_title}")
     filenames = _get_image_filenames(page_title)
     urls = _resolve_image_urls(filenames)
-    print(f"  Found {len(urls)} images")
+    dim(f"  Found {len(urls)} images")
     return urls
 
 
@@ -100,8 +118,15 @@ def download_image(url: str) -> np.ndarray | None:
         resp.raise_for_status()
         return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
     except Exception as e:
-        print(f"  Skipped ({e})")
-        return None
+        warn(f"  Failed ({e})\n trying again after a 15 second sleep ...")
+        time.sleep(15)
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+        except Exception as e:
+            print(f"  Skipped ({e})")
+            return None
 
 
 # --- Mask drawing ------------------------------------------------------------
@@ -169,7 +194,7 @@ def draw_mask(
 
     h, w = current[0].shape[:2]
     if len(vertices) < 3:
-        print("  (fewer than 3 vertices — using full image as mask)")
+        warn("  (fewer than 3 vertices — using full image as mask)")
         return current[0], np.ones((h, w), dtype=np.uint8)
 
     path = Path(vertices)
@@ -182,7 +207,7 @@ def draw_mask(
 # --- Main data collection loop -----------------------------------------------
 
 def collect_sample(keyword: str, output_dir: str):
-    print(f"\nLooking up '{keyword}' on Wikipedia...")
+    header(f"Looking up '{keyword}' on Wikipedia...")
     urls = get_image_urls(keyword)
 
     # Shared cursor — each call to next_image() advances it, whether it's the
@@ -196,19 +221,11 @@ def collect_sample(keyword: str, output_dir: str):
             img = download_image(url)
             if img is not None:
                 return img
-        print("  No more images available.")
+        warn("  No more images available.")
         return None
 
-    # Download the first 1 image up front
-    initial = []
-    while len(initial) < 1:
-        img = next_image()
-        if img is None:
-            break
-        initial.append(img)
-
-    if len(initial) < 1:
-        print(f"Only found {len(initial)} images (need 3). Try a different keyword.")
+    if not urls:
+        error("No images found. Try a different keyword.")
         return
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -224,20 +241,24 @@ def collect_sample(keyword: str, output_dir: str):
         ("result",      "Image 3 — Result image",        False),
     ]
 
-    for (stem, label, zero_outside), img in zip(steps, initial):
+    for stem, label, zero_outside in steps:
+        img = next_image()
+        if img is None:
+            error("Ran out of images. Try a different keyword.")
+            return
         final_arr, mask = draw_mask(img, label, get_replacement=next_image)
 
         if zero_outside:
             out = final_arr.copy()
             out[mask == 0] = 0
             Image.fromarray(out).save(os.path.join(sample_dir, f"{stem}.jpg"))
-            print(f"  Saved {stem}.jpg")
+            success(f"  Saved {stem}.jpg")
         else:
             Image.fromarray(final_arr).save(os.path.join(sample_dir, f"{stem}.jpg"))
             Image.fromarray(mask * 255).save(os.path.join(sample_dir, f"{stem}_mask.png"))
-            print(f"  Saved {stem}.jpg + {stem}_mask.png")
+            success(f"  Saved {stem}.jpg + {stem}_mask.png")
 
-    print(f"\nSample saved to: {sample_dir}/")
+    print(f"\n{BOLD}{GREEN}Sample saved to: {sample_dir}/{R}")
 
 
 if __name__ == "__main__":
