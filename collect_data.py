@@ -20,6 +20,7 @@ Requirements:
 
 import io
 import os
+import random
 import sys
 import datetime
 import time
@@ -207,6 +208,7 @@ def draw_mask(
                 current[0] = new_img
                 vertices.clear()
                 im.set_data(new_img)
+                im.set_extent([-0.5, new_img.shape[1] - 0.5, new_img.shape[0] - 0.5, -0.5])
                 line.set_data([], [])
                 ax.relim()
                 ax.autoscale_view()
@@ -366,8 +368,13 @@ def collect_from_url(start_url: str, output_dir: str):
         return False
 
     # stable sort: different links first, then the rest in original order
-    links_sorted = sorted(links, key=lambda t: 0 if _is_different(t[1]) else 1)
+    # links_sorted = sorted(links, key=lambda t: 0 if _is_different(t[1]) else 1)
+    links_sorted = sorted(links, key=lambda t: random.randint(0,1))
     return sample_dir, links_sorted
+
+
+def collect_from_folder(folder: str, output_dir: str):
+    pass
 
 
 def choose_from_list(prompt: str, max_items: int):
@@ -383,59 +390,59 @@ def choose_from_list(prompt: str, max_items: int):
                 return n - 1
         print("Invalid choice. Enter number, 'c' to enter custom URL, or 'q' to quit.")
 
+def get_source():
+    if links:
+        print("\nLinks found on this site:")
+        max_show = min(30, len(links))
+        for idx, (text, url) in enumerate(links[:max_show], start=1):
+            short = text if len(text) <= 60 else text[:57] + "..."
+            print(f"  {idx}. {short} -> {url}")
+        if len(links) > max_show:
+            print(f"  ... and {len(links) - max_show} more")
+
+    print("\nChoose the next link to visit by number, 'c' to enter a custom URL, 'f' to enter a folder, or 'q' to quit.")
+    sel = choose_from_list("Your choice: ", max_show)
+    is_url = True
+    next_target = None
+    if sel == "q":
+        print("Quitting.")
+        sys.exit(0)
+    if sel == "c":
+        next_target = input("Enter next URL: ").strip()
+    elif sel == "f":
+        next_target = input("Enter folder path: ").strip()
+        is_url = False
+    else:
+        next_target = links[sel][1]
+
+
+    if not next_target:
+        print("Nothing entered. Exiting.")
+        sys.exit(0)
+
+    return next_target, is_url
 
 if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     os.makedirs(output_dir, exist_ok=True)
 
-    current_url = input("Enter a starting URL (or 'q' to quit): ").strip()
-    if not current_url or current_url.lower() in ("q", "quit"):
-        print("Nothing to do. Exiting.")
-        sys.exit(0)
+    current_target, is_url = get_source()
 
-    visited = set()
+    is_url = True
     while True:
-        if current_url in visited:
-            warn(f"Already visited {current_url}")
+        if is_url:
+            res = collect_from_url(current_target, output_dir)
+            if res is not None:
+                sample_dir, links = res
+                print(f"Sample saved to: {sample_dir}")
         else:
-            res = collect_from_url(current_url, output_dir)
-            if res is None:
-                # allow user to enter another URL
-                nxt = input("Enter another URL to continue, or 'q' to quit: ").strip()
-                if not nxt or nxt.lower() == "q":
-                    break
-                current_url = nxt
-                continue
-            sample_dir, links = res
-            visited.add(current_url)
-            print(f"Sample saved to: {sample_dir}")
+            res = collect_from_folder(current_target, output_dir)
+            if res is not None:
+                sample_dir, links = res
+                print(f"Sample saved to: {sample_dir}")
 
-            if links:
-                print("\nLinks found on this site:")
-                max_show = min(30, len(links))
-                for idx, (text, url) in enumerate(links[:max_show], start=1):
-                    short = text if len(text) <= 60 else text[:57] + "..."
-                    print(f"  {idx}. {short} -> {url}")
-                if len(links) > max_show:
-                    print(f"  ... and {len(links) - max_show} more")
 
-                print("\nChoose the next link to visit by number, 'c' to enter a custom URL, or 'q' to quit.")
-                sel = choose_from_list("Your choice: ", max_show)
-                if sel == "q":
-                    print("Quitting.")
-                    break
-                if sel == "c":
-                    new = input("Enter next URL: ").strip()
-                    if not new:
-                        print("No URL entered. Exiting.")
-                        break
-                    current_url = new
-                else:
-                    current_url = links[sel][1]
-            else:
-                new = input("No links found. Enter another URL to continue, or 'q' to quit: ").strip()
-                if not new or new.lower() == "q":
-                    break
-                current_url = new
+
+        current_target, is_url = get_source()
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)
