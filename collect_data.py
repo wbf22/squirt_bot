@@ -25,6 +25,7 @@ import sys
 import datetime
 import time
 
+from matplotlib import patches
 import numpy as np
 import requests
 from PIL import Image
@@ -171,6 +172,7 @@ def draw_mask(
 ) -> tuple[np.ndarray, np.ndarray]:
     current = [image_array]
     vertices = []
+    paths = []
 
     fig, ax = plt.subplots(figsize=(10, 8))
     im = ax.imshow(current[0])
@@ -187,15 +189,29 @@ def draw_mask(
         if not vertices:
             line.set_data([], [])
             fig.canvas.draw_idle()
-            return
-        xs = [v[0] for v in vertices] + [vertices[0][0]]
-        ys = [v[1] for v in vertices] + [vertices[0][1]]
-        line.set_data(xs, ys)
-        fig.canvas.draw_idle()
+        else:
+            xs = [v[0] for v in vertices] + [vertices[0][0]]
+            ys = [v[1] for v in vertices] + [vertices[0][1]]
+            line.set_data(xs, ys)
+            fig.canvas.draw_idle()
+
+        for path in paths:
+            patch = patches.PathPatch(path, facecolor='none', edgecolor='red', lw=2)
+            fig, ax = plt.subplots()
+            ax.add_patch(patch)
+            ax.autoscale_view()
+
+
 
     def _onclick(event):
         if event.inaxes != ax:
             return
+        
+
+        key = (event.key or "").lower()
+        ctrl = ("ctrl" in key) or ("control" in key)
+        cmd = ("cmd" in key) or ("meta" in key)
+
         # matplotlib button: 1 left, 2 middle, 3 right
         if event.button == 1:       # left-click → add vertex
             vertices.append((event.xdata, event.ydata))
@@ -213,8 +229,13 @@ def draw_mask(
                 ax.relim()
                 ax.autoscale_view()
                 fig.canvas.draw_idle()
-        elif event.button == 3:     # right-click → done
-            plt.close(fig)
+        elif event.button == 3:     # right-click → done or new poly
+            if ctrl or cmd:
+                path = Path(vertices)
+                paths.append(path)
+                vertices.clear()
+            else:
+                plt.close(fig)
 
     fig.canvas.mpl_connect("button_press_event", _onclick)
     plt.show()
@@ -446,13 +467,16 @@ def choose_from_list(prompt: str, max_items: int):
             return "q"
         if choice == "c":
             return "c"
+        if choice == "f":
+            return "f"
         if choice.isdigit():
             n = int(choice)
             if 1 <= n <= max_items:
                 return n - 1
-        print("Invalid choice. Enter number, 'c' to enter custom URL, or 'q' to quit.")
+        print("Invalid choice. Enter number, 'c' to enter a custom URL, 'f' to enter a folder, or 'q' to quit.")
 
 def get_source():
+    max_show = 0
     if links:
         print("\nLinks found on this site:")
         max_show = min(30, len(links))
@@ -488,9 +512,9 @@ if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     os.makedirs(output_dir, exist_ok=True)
 
+    links = []
     current_target, is_url = get_source()
 
-    is_url = True
     while True:
         if is_url:
             res = collect_from_url(current_target, output_dir)
