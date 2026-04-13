@@ -195,7 +195,7 @@ def draw_mask(
     h, w = current[0].shape[:2]
     if len(vertices) < 3:
         warn("  (fewer than 3 vertices — using full image as mask)")
-        return current[0], np.ones((h, w), dtype=np.uint8)
+        return current[0], np.zeros((h, w), dtype=np.uint8)
 
     path = Path(vertices)
     y_idx, x_idx = np.mgrid[:h, :w]
@@ -205,6 +205,87 @@ def draw_mask(
 
 
 # --- Main data collection loop -----------------------------------------------
+
+# Target exact output size
+TARGET_W = 1920
+TARGET_H = 1080
+
+
+def _fit_and_pad_to_target(img_arr: np.ndarray, target_w: int = TARGET_W, target_h: int = TARGET_H) -> np.ndarray:
+    """Return an RGB uint8 numpy array sized exactly (target_h, target_w, 3).
+
+    Behavior:
+    - Consider the original orientation and a 90-degree rotation; pick the orientation
+      that yields the larger scale when fitting into target (so we minimize padding).
+    - Resize (up or down) to fit within target while preserving aspect ratio.
+    - Place the resized image anchored to the top-right: pad on the left if needed and
+      pad on the bottom if needed (i.e., x offset = target_w - new_w, y offset = 0).
+    """
+    assert img_arr.ndim == 3 and img_arr.shape[2] == 3
+
+    h0, w0 = img_arr.shape[:2]
+
+    # Compute scale for both orientations
+    scale_orig = min(target_w / w0, target_h / h0)
+    scale_rot = min(target_w / h0, target_h / w0)
+
+    rotate = scale_rot > scale_orig
+    if rotate:
+        arr = np.rot90(img_arr, k=1)
+        h, w = arr.shape[:2]
+    else:
+        arr = img_arr
+        h, w = h0, w0
+
+    scale = min(target_w / w, target_h / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+
+    pil = Image.fromarray(arr)
+    pil_resized = pil.resize((new_w, new_h), resample=Image.LANCZOS)
+    resized = np.array(pil_resized)
+
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    paste_x = target_w - new_w  # pad on the left if new_w < target_w
+    paste_y = 0                 # pad on the bottom if new_h < target_h
+
+    canvas[paste_y:paste_y + new_h, paste_x:paste_x + new_w] = resized
+    return canvas
+
+
+def _fit_and_pad_mask(mask_arr: np.ndarray, target_w: int = TARGET_W, target_h: int = TARGET_H) -> np.ndarray:
+    """Return a binary (0/1) mask of shape (target_h, target_w) matching the image placement used above.
+
+    Uses nearest-neighbor interpolation for resizing. Rotation follows the image choice.
+    """
+    assert mask_arr.ndim == 2
+
+    h0, w0 = mask_arr.shape[:2]
+    scale_orig = min(target_w / w0, target_h / h0)
+    scale_rot = min(target_w / h0, target_h / w0)
+
+    rotate = scale_rot > scale_orig
+    if rotate:
+        arr = np.rot90(mask_arr, k=1)
+        h, w = arr.shape[:2]
+    else:
+        arr = mask_arr
+        h, w = h0, w0
+
+    scale = min(target_w / w, target_h / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+
+    pil = Image.fromarray((arr * 255).astype(np.uint8))
+    pil_resized = pil.resize((new_w, new_h), resample=Image.NEAREST)
+    resized = (np.array(pil_resized) // 255).astype(np.uint8)
+
+    canvas = np.zeros((target_h, target_w), dtype=np.uint8)
+    paste_x = target_w - new_w
+    paste_y = 0
+    canvas[paste_y:paste_y + new_h, paste_x:paste_x + new_w] = resized
+    return canvas
+
 
 def collect_sample(keyword: str, output_dir: str):
     header(f"Looking up '{keyword}' on Wikipedia...")
@@ -248,14 +329,18 @@ def collect_sample(keyword: str, output_dir: str):
             return
         final_arr, mask = draw_mask(img, label, get_replacement=next_image)
 
+        # Fit and pad to exact TARGET_W x TARGET_H
+        final_fixed = _fit_and_pad_to_target(final_arr)
+        mask_fixed = _fit_and_pad_mask(mask)
+
         if zero_outside:
-            out = final_arr.copy()
-            out[mask == 0] = 0
+            out = final_fixed.copy()
+            out[mask_fixed == 0] = 0
             Image.fromarray(out).save(os.path.join(sample_dir, f"{stem}.jpg"))
             success(f"  Saved {stem}.jpg")
         else:
-            Image.fromarray(final_arr).save(os.path.join(sample_dir, f"{stem}.jpg"))
-            Image.fromarray(mask * 255).save(os.path.join(sample_dir, f"{stem}_mask.png"))
+            Image.fromarray(final_fixed).save(os.path.join(sample_dir, f"{stem}.jpg"))
+            Image.fromarray((mask_fixed * 255).astype(np.uint8)).save(os.path.join(sample_dir, f"{stem}_mask.png"))
             success(f"  Saved {stem}.jpg + {stem}_mask.png")
 
     print(f"\n{BOLD}{GREEN}Sample saved to: {sample_dir}/{R}")
@@ -265,6 +350,6 @@ if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     
     keyword = ""
-    while keyword != "done":
+    while keyword != "q" and keyword != "quit":
         keyword = input("Keyword: ")
         collect_sample(keyword, output_dir)
