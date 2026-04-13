@@ -303,13 +303,16 @@ def collect_from_url(start_url: str, output_dir: str):
 
     cursor = [0]
     def next_image():
-        while cursor[0] < len(image_urls):
-            url = image_urls[cursor[0]]
-            cursor[0] += 1
-            img = download_image_to_array(url)
-            if img is not None:
-                return img
-        warn("No more images available on this page.")
+        if cursor[0] >= len(image_urls):
+            cursor[0] = 0
+            warn("No more images available on this page.")
+
+        url = image_urls[cursor[0]]
+        cursor[0] += 1
+        img = download_image_to_array(url)
+        if img is not None:
+            return img
+        
         return None
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -345,8 +348,26 @@ def collect_from_url(start_url: str, output_dir: str):
             success(f"  Saved {stem}.jpg + {stem}_mask.png")
 
     # After saving, parse links from the base page and offer choices
-    links = find_links_on_page(base_html, start_url, same_domain=True)
-    return sample_dir, links
+    # Gather all links (including cross-domain) then sort so that links from
+    # different domains or with a different first path segment appear first.
+    links = find_links_on_page(base_html, start_url, same_domain=False)
+
+    def _is_different(link_url: str) -> bool:
+        p_base = urlparse(start_url)
+        p = urlparse(link_url)
+        # different domain -> consider different
+        if p.netloc != p_base.netloc:
+            return True
+        def first_seg(parsed_obj):
+            seg = parsed_obj.path.lstrip('/').split('/', 1)[0]
+            return seg
+        if first_seg(p_base) != first_seg(p):
+            return True
+        return False
+
+    # stable sort: different links first, then the rest in original order
+    links_sorted = sorted(links, key=lambda t: 0 if _is_different(t[1]) else 1)
+    return sample_dir, links_sorted
 
 
 def choose_from_list(prompt: str, max_items: int):
