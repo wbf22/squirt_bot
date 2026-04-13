@@ -1,26 +1,26 @@
 """
 Interactive data collection for TargetDetector training.
 
-Picks a random keyword, fetches 3 images from Wikipedia, then prompts you
-to draw a mask on each:
-
-  Image 1 — target:      mask drawn → everything outside zeroed → saved as target.jpg
-  Image 2 — anti-target: mask drawn → everything outside zeroed → saved as anti_target.jpg
-  Image 3 — result:      mask drawn → image saved as-is (result.jpg) + mask (result_mask.png)
+This version crawls images from arbitrary web pages starting from a URL. For each
+sample the script pulls images from the current page (and replacement images
+while drawing), allows you to draw masks, then offers links found on that page
+as choices for the next page to crawl.
 
 Controls:
-  Click         add polygon vertex
-  Click 1st pt  close the polygon
-  Enter         confirm and move to next image
+  Left-click    add polygon vertex
+  Right-click   confirm and move on
+  Middle-click  swap in next image from the pool (if available)
 
 Usage:
     python collect_data.py [output_dir]
+
+Requirements:
+    pip install requests beautifulsoup4 pillow matplotlib numpy
 """
 
 import io
 import os
 import sys
-import random
 import datetime
 import time
 
@@ -29,6 +29,8 @@ import requests
 from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 
 
 # --- Colors ------------------------------------------------------------------
@@ -49,84 +51,114 @@ def error(msg):   print(f"{RED}{msg}{R}")
 def header(msg):  print(f"\n{BOLD}{CYAN}{msg}{R}")
 
 
-# --- Wikipedia fetch (same as collect_images.py) ----------------------------
+# --- HTTP / scraping utilities -----------------------------------------------
 
-WIKI_API = "https://en.wikipedia.org/w/api.php"
-HEADERS = {"User-Agent": "squirt_bot/1.0 (data collection script)"}
-
-KEYWORDS = [
-    "cat", "dog", "bird", "rabbit", "squirrel", "raccoon",
-    "crow", "pigeon", "sparrow", "duck", "chicken", "goose",
-]
-
-def _search_top_page(keyword: str) -> str | None:
-    resp = requests.get(WIKI_API, headers=HEADERS, params={
-        "action": "query", "list": "search",
-        "srsearch": keyword, "format": "json",
-    }, timeout=10)
-    resp.raise_for_status()
-    results = resp.json()["query"]["search"]
-    return results[0]["title"] if results else None
+HEADERS = {"User-Agent": "collect-data-bot/1.0"}
+SLEEP_BETWEEN_REQUESTS = 0.8
 
 
-def _get_image_filenames(page_title: str) -> list[str]:
-    resp = requests.get(WIKI_API, headers=HEADERS, params={
-        "action": "query", "titles": page_title,
-        "prop": "images", "imlimit": 50, "format": "json",
-    }, timeout=10)
-    resp.raise_for_status()
-    pages = resp.json()["query"]["pages"]
-    page = next(iter(pages.values()))
-    return [img["title"] for img in page.get("images", [])]
-
-
-def _resolve_image_urls(filenames: list[str]) -> list[str]:
-    urls = []
-    for filename in filenames:
-        ext = filename.rsplit(".", 1)[-1].lower()
-        if ext not in ("jpg", "jpeg", "png", "gif", "webp"):
-            continue
-        resp = requests.get(WIKI_API, headers=HEADERS, params={
-            "action": "query", "titles": filename,
-            "prop": "imageinfo", "iiprop": "url", "format": "json",
-        }, timeout=10)
-        resp.raise_for_status()
-        pages = resp.json()["query"]["pages"]
-        page = next(iter(pages.values()))
-        info = page.get("imageinfo", [])
-        if info:
-            urls.append(info[0]["url"])
-    return urls
-
-
-def get_image_urls(keyword: str) -> list[str]:
-    """Resolve all image URLs from the top Wikipedia article (no downloads)."""
-    page_title = _search_top_page(keyword)
-    if not page_title:
-        return []
-    info(f"  Wikipedia article: {page_title}")
-    filenames = _get_image_filenames(page_title)
-    urls = _resolve_image_urls(filenames)
-    dim(f"  Found {len(urls)} images")
-    return urls
-
-
-def download_image(url: str) -> np.ndarray | None:
-    """Download a single image and return it as a numpy array."""
+def fetch_page(url: str, timeout: int = 15) -> requests.Response | None:
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
+        r = requests.get(url, headers=HEADERS, timeout=timeout)
+        r.raise_for_status()
+        return r
     except Exception as e:
-        warn(f"  Failed ({e})\n trying again after a 15 second sleep ...")
-        time.sleep(15)
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-            resp.raise_for_status()
-            return np.array(Image.open(io.BytesIO(resp.content)).convert("RGB"))
-        except Exception as e:
-            print(f"  Skipped ({e})")
-            return None
+        warn(f"Failed to fetch {url}: {e}")
+        return None
+
+
+def find_images_on_page(html: str, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    imgs = set()
+    for img in soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-original")
+        if not src:
+            continue
+        absolute = urljoin(base_url, src)
+        if absolute.startswith("data:"):
+            continue
+        if not absolute.lower().startswith(("http://", "https://")):
+            continue
+        # filter by common image extensions if present
+        path = urlparse(absolute).path
+        ext = os.path.splitext(path)[1].lower()
+        if ext and ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            continue
+        imgs.add(absolute)
+    return sorted(imgs)
+
+
+def find_links_on_page(html: str, base_url: str, same_domain: bool = True) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    base_netloc = urlparse(base_url).netloc
+    links = []
+    seen = set()
+    for a in soup.find_all("a"):
+        href = a.get("href")
+        if not href:
+            continue
+        if href.startswith("#") or href.startswith("javascript:") or href.startswith("mailto:"):
+            continue
+        absolute = urljoin(base_url, href)
+        parsed = urlparse(absolute)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if same_domain and parsed.netloc != base_netloc:
+            continue
+        norm = parsed.scheme + "://" + parsed.netloc + parsed.path + (("?" + parsed.query) if parsed.query else "")
+        if norm in seen:
+            continue
+        seen.add(norm)
+        text = (a.get_text() or "").strip()
+        links.append((text or "-", norm))
+    return links
+
+
+def filename_from_url(url: str) -> str:
+    p = urlparse(url).path
+    name = os.path.basename(p)
+    if not name:
+        name = "image"
+    if not os.path.splitext(name)[1]:
+        name = name + ".jpg"
+    return name
+
+
+def unique_filename(directory: str, basename: str) -> str:
+    base, ext = os.path.splitext(basename)
+    candidate = basename
+    i = 1
+    while os.path.exists(os.path.join(directory, candidate)):
+        candidate = f"{base}_{i}{ext}"
+        i += 1
+    return candidate
+
+
+def download_image_to_array(url: str) -> np.ndarray | None:
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        return np.array(Image.open(io.BytesIO(r.content)).convert("RGB"))
+    except Exception as e:
+        warn(f"  Failed to download {url}: {e}")
+        return None
+
+
+def download_image_to_file(url: str, out_dir: str) -> str | None:
+    try:
+        r = requests.get(url, headers=HEADERS, stream=True, timeout=20)
+        r.raise_for_status()
+        fname = filename_from_url(url)
+        fname = unique_filename(out_dir, fname)
+        fpath = os.path.join(out_dir, fname)
+        with open(fpath, "wb") as f:
+            for chunk in r.iter_content(8192):
+                if chunk:
+                    f.write(chunk)
+        return fpath
+    except Exception as e:
+        warn(f"  Failed to download {url}: {e}")
+        return None
 
 
 # --- Mask drawing ------------------------------------------------------------
@@ -136,15 +168,6 @@ def draw_mask(
     title: str,
     get_replacement=None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Display image_array and let the user draw a polygon mask.
-
-    Left-click:   add vertex (polygon draws live)
-    Middle-click: swap in the next image from the pool (calls get_replacement)
-    Right-click:  confirm mask and move on
-
-    Returns (final_image_array, mask) where mask is (H x W, uint8) with 1 inside polygon.
-    """
     current = [image_array]
     vertices = []
 
@@ -161,6 +184,8 @@ def draw_mask(
 
     def _redraw_poly():
         if not vertices:
+            line.set_data([], [])
+            fig.canvas.draw_idle()
             return
         xs = [v[0] for v in vertices] + [vertices[0][0]]
         ys = [v[1] for v in vertices] + [vertices[0][1]]
@@ -170,6 +195,7 @@ def draw_mask(
     def _onclick(event):
         if event.inaxes != ax:
             return
+        # matplotlib button: 1 left, 2 middle, 3 right
         if event.button == 1:       # left-click → add vertex
             vertices.append((event.xdata, event.ydata))
             _redraw_poly()
@@ -181,7 +207,6 @@ def draw_mask(
                 current[0] = new_img
                 vertices.clear()
                 im.set_data(new_img)
-                im.set_extent([-0.5, new_img.shape[1] - 0.5, new_img.shape[0] - 0.5, -0.5])
                 line.set_data([], [])
                 ax.relim()
                 ax.autoscale_view()
@@ -204,31 +229,17 @@ def draw_mask(
     return current[0], mask
 
 
-# --- Main data collection loop -----------------------------------------------
+# --- Fit / pad utilities ----------------------------------------------------
 
-# Target exact output size
 TARGET_W = 1920
 TARGET_H = 1080
 
 
 def _fit_and_pad_to_target(img_arr: np.ndarray, target_w: int = TARGET_W, target_h: int = TARGET_H) -> np.ndarray:
-    """Return an RGB uint8 numpy array sized exactly (target_h, target_w, 3).
-
-    Behavior:
-    - Consider the original orientation and a 90-degree rotation; pick the orientation
-      that yields the larger scale when fitting into target (so we minimize padding).
-    - Resize (up or down) to fit within target while preserving aspect ratio.
-    - Place the resized image anchored to the top-right: pad on the left if needed and
-      pad on the bottom if needed (i.e., x offset = target_w - new_w, y offset = 0).
-    """
     assert img_arr.ndim == 3 and img_arr.shape[2] == 3
-
     h0, w0 = img_arr.shape[:2]
-
-    # Compute scale for both orientations
     scale_orig = min(target_w / w0, target_h / h0)
     scale_rot = min(target_w / h0, target_h / w0)
-
     rotate = scale_rot > scale_orig
     if rotate:
         arr = np.rot90(img_arr, k=1)
@@ -236,34 +247,24 @@ def _fit_and_pad_to_target(img_arr: np.ndarray, target_w: int = TARGET_W, target
     else:
         arr = img_arr
         h, w = h0, w0
-
     scale = min(target_w / w, target_h / h)
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
-
     pil = Image.fromarray(arr)
     pil_resized = pil.resize((new_w, new_h), resample=Image.LANCZOS)
     resized = np.array(pil_resized)
-
     canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-    paste_x = target_w - new_w  # pad on the left if new_w < target_w
-    paste_y = 0                 # pad on the bottom if new_h < target_h
-
+    paste_x = target_w - new_w
+    paste_y = 0
     canvas[paste_y:paste_y + new_h, paste_x:paste_x + new_w] = resized
     return canvas
 
 
 def _fit_and_pad_mask(mask_arr: np.ndarray, target_w: int = TARGET_W, target_h: int = TARGET_H) -> np.ndarray:
-    """Return a binary (0/1) mask of shape (target_h, target_w) matching the image placement used above.
-
-    Uses nearest-neighbor interpolation for resizing. Rotation follows the image choice.
-    """
     assert mask_arr.ndim == 2
-
     h0, w0 = mask_arr.shape[:2]
     scale_orig = min(target_w / w0, target_h / h0)
     scale_rot = min(target_w / h0, target_h / w0)
-
     rotate = scale_rot > scale_orig
     if rotate:
         arr = np.rot90(mask_arr, k=1)
@@ -271,15 +272,12 @@ def _fit_and_pad_mask(mask_arr: np.ndarray, target_w: int = TARGET_W, target_h: 
     else:
         arr = mask_arr
         h, w = h0, w0
-
     scale = min(target_w / w, target_h / h)
     new_w = max(1, int(round(w * scale)))
     new_h = max(1, int(round(h * scale)))
-
     pil = Image.fromarray((arr * 255).astype(np.uint8))
     pil_resized = pil.resize((new_w, new_h), resample=Image.NEAREST)
     resized = (np.array(pil_resized) // 255).astype(np.uint8)
-
     canvas = np.zeros((target_h, target_w), dtype=np.uint8)
     paste_x = target_w - new_w
     paste_y = 0
@@ -287,52 +285,55 @@ def _fit_and_pad_mask(mask_arr: np.ndarray, target_w: int = TARGET_W, target_h: 
     return canvas
 
 
-def collect_sample(keyword: str, output_dir: str):
-    header(f"Looking up '{keyword}' on Wikipedia...")
-    urls = get_image_urls(keyword)
+# --- Main collection routine -------------------------------------------------
 
-    # Shared cursor — each call to next_image() advances it, whether it's the
-    # initial load or a middle-click swap
+
+def collect_from_url(start_url: str, output_dir: str):
+    header(f"Starting at: {start_url}")
+    r = fetch_page(start_url)
+    if not r:
+        error("Failed to fetch starting URL.")
+        return None
+    base_html = r.text
+    image_urls = find_images_on_page(base_html, start_url)
+    if not image_urls:
+        warn("No images found on the starting page.")
+        return None
+    dim(f"Found {len(image_urls)} images on page.")
+
     cursor = [0]
-
-    def next_image() -> np.ndarray | None:
-        while cursor[0] < len(urls):
-            url = urls[cursor[0]]
+    def next_image():
+        while cursor[0] < len(image_urls):
+            url = image_urls[cursor[0]]
             cursor[0] += 1
-            img = download_image(url)
+            img = download_image_to_array(url)
             if img is not None:
                 return img
-        warn("  No more images available.")
+        warn("No more images available on this page.")
         return None
 
-    if not urls:
-        error("No images found. Try a different keyword.")
-        return
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sample_dir = os.path.join(output_dir, f"{keyword.replace(' ', '_')}_{timestamp}")
+    parsed = urlparse(start_url)
+    safe_netloc = parsed.netloc.replace(":", "_")
+    sample_dir = os.path.join(output_dir, f"{safe_netloc}_{timestamp}")
     os.makedirs(sample_dir, exist_ok=True)
-
-    with open(os.path.join(sample_dir, "keyword.txt"), "w") as f:
-        f.write(keyword)
+    with open(os.path.join(sample_dir, "source_url.txt"), "w") as f:
+        f.write(start_url)
 
     steps = [
-        ("target",      "Image 1 — Target example",      True),
-        ("anti_target", "Image 2 — Anti-target example", True),
-        ("result",      "Image 3 — Result image",        False),
+        ("target", True, "Image 1 — Target example"),
+        ("anti_target", True, "Image 2 — Anti-target example"),
+        ("result", False, "Image 3 — Result image"),
     ]
 
-    for stem, label, zero_outside in steps:
+    for stem, zero_outside, title in steps:
         img = next_image()
         if img is None:
-            error("Ran out of images. Try a different keyword.")
-            return
-        final_arr, mask = draw_mask(img, label, get_replacement=next_image)
-
-        # Fit and pad to exact TARGET_W x TARGET_H
+            error("Ran out of images while collecting a sample.")
+            return sample_dir
+        final_arr, mask = draw_mask(img, title, get_replacement=next_image)
         final_fixed = _fit_and_pad_to_target(final_arr)
         mask_fixed = _fit_and_pad_mask(mask)
-
         if zero_outside:
             out = final_fixed.copy()
             out[mask_fixed == 0] = 0
@@ -343,13 +344,77 @@ def collect_sample(keyword: str, output_dir: str):
             Image.fromarray((mask_fixed * 255).astype(np.uint8)).save(os.path.join(sample_dir, f"{stem}_mask.png"))
             success(f"  Saved {stem}.jpg + {stem}_mask.png")
 
-    print(f"\n{BOLD}{GREEN}Sample saved to: {sample_dir}/{R}")
+    # After saving, parse links from the base page and offer choices
+    links = find_links_on_page(base_html, start_url, same_domain=True)
+    return sample_dir, links
+
+
+def choose_from_list(prompt: str, max_items: int):
+    while True:
+        choice = input(prompt).strip().lower()
+        if choice == "q":
+            return "q"
+        if choice == "c":
+            return "c"
+        if choice.isdigit():
+            n = int(choice)
+            if 1 <= n <= max_items:
+                return n - 1
+        print("Invalid choice. Enter number, 'c' to enter custom URL, or 'q' to quit.")
 
 
 if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
-    
-    keyword = ""
-    while keyword != "q" and keyword != "quit":
-        keyword = input("Keyword: ")
-        collect_sample(keyword, output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    current_url = input("Enter a starting URL (or 'q' to quit): ").strip()
+    if not current_url or current_url.lower() in ("q", "quit"):
+        print("Nothing to do. Exiting.")
+        sys.exit(0)
+
+    visited = set()
+    while True:
+        if current_url in visited:
+            warn(f"Already visited {current_url}")
+        else:
+            res = collect_from_url(current_url, output_dir)
+            if res is None:
+                # allow user to enter another URL
+                nxt = input("Enter another URL to continue, or 'q' to quit: ").strip()
+                if not nxt or nxt.lower() == "q":
+                    break
+                current_url = nxt
+                continue
+            sample_dir, links = res
+            visited.add(current_url)
+            print(f"Sample saved to: {sample_dir}")
+
+            if links:
+                print("\nLinks found on this site:")
+                max_show = min(30, len(links))
+                for idx, (text, url) in enumerate(links[:max_show], start=1):
+                    short = text if len(text) <= 60 else text[:57] + "..."
+                    print(f"  {idx}. {short} -> {url}")
+                if len(links) > max_show:
+                    print(f"  ... and {len(links) - max_show} more")
+
+                print("\nChoose the next link to visit by number, 'c' to enter a custom URL, or 'q' to quit.")
+                sel = choose_from_list("Your choice: ", max_show)
+                if sel == "q":
+                    print("Quitting.")
+                    break
+                if sel == "c":
+                    new = input("Enter next URL: ").strip()
+                    if not new:
+                        print("No URL entered. Exiting.")
+                        break
+                    current_url = new
+                else:
+                    current_url = links[sel][1]
+            else:
+                new = input("No links found. Enter another URL to continue, or 'q' to quit: ").strip()
+                if not new or new.lower() == "q":
+                    break
+                current_url = new
+
+        time.sleep(SLEEP_BETWEEN_REQUESTS)
