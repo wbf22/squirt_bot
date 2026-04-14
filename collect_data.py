@@ -20,10 +20,12 @@ Requirements:
 
 import io
 import os
+import pathlib
 import random
 import sys
 import datetime
 import time
+from typing import List, Union
 
 import matplotlib
 from matplotlib import patches
@@ -55,12 +57,43 @@ def warn(msg):    print(f"{YELLOW}{msg}{R}")
 def error(msg):   print(f"{RED}{msg}{R}")
 def header(msg):  print(f"\n{BOLD}{CYAN}{msg}{R}")
 
+# --- File Scraping utilities -----------------------------
+def get_subfolders(directory: Union[str, Path],
+                   absolute: bool = True,
+                   include_hidden: bool = False) -> List[str]:
+    """
+    Return the paths to immediate subfolders of `directory`.
+
+    Args:
+        directory: path to the directory to inspect.
+        absolute: if True, return absolute paths; if False, return paths relative to `directory`.
+        include_hidden: if False, skip hidden folders (those starting with '.').
+
+    Returns:
+        List of folder paths as strings.
+
+    Raises:
+        FileNotFoundError if directory doesn't exist.
+        NotADirectoryError if path is not a directory.
+    """
+    p = pathlib.Path(directory)
+    if not p.exists():
+        raise FileNotFoundError(f"{directory} does not exist")
+    if not p.is_dir():
+        raise NotADirectoryError(f"{directory} is not a directory")
+
+    result = []
+    for child in p.iterdir():
+        if child.is_dir():
+            if not include_hidden and child.name.startswith('.'):
+                continue
+            result.append(str(child.resolve()) if absolute else str(child.relative_to(p)))
+    return result
 
 # --- HTTP / scraping utilities -----------------------------------------------
 
 HEADERS = {"User-Agent": "collect-data-bot/1.0"}
 SLEEP_BETWEEN_REQUESTS = 0.8
-
 
 def fetch_page(url: str, timeout: int = 15) -> requests.Response | None:
     try:
@@ -181,13 +214,10 @@ def draw_mask(
     im = ax.imshow(current[0])
     line, = ax.plot([], [], "r-o", linewidth=2, markersize=6)
     lines = []
+    extra = "  |  Middle-click: next image" if get_replacement else ""
+    ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm |  Middle-click: next image | Ctrl + Right-Click: new polygon")
     fig.tight_layout()
 
-    def _set_title():
-        extra = "  |  Middle-click: next image" if get_replacement else ""
-        ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm |  Middle-click: next image | Ctrl + Right-Click: new polygon")
-
-    _set_title()
 
     def _redraw_poly(fig, ax):
         if not vertices:
@@ -220,7 +250,12 @@ def draw_mask(
         cmd = ("cmd" in key) or ("meta" in key)
 
         # matplotlib button: 1 left, 2 middle, 3 right
-        if event.button == 1:       # left-click → add vertex
+        if event.button == 1:       # left-click → add vertex or new poly
+            if ctrl or cmd:
+                if len(vertices) > 0:
+                    new_group = vertices.copy()
+                    vertex_groups.append(new_group)
+                vertices.clear()
             vertices.append((event.xdata, event.ydata))
             _redraw_poly(fig, ax)
         elif event.button == 2:     # middle-click → swap image
@@ -236,16 +271,8 @@ def draw_mask(
                 ax.relim()
                 ax.autoscale_view()
                 fig.canvas.draw_idle()
-        elif event.button == 3:     # right-click → done or new poly
-            if ctrl or cmd:
-                if len(vertices) > 0:
-                    new_group = vertices.copy()
-                    vertex_groups.append(new_group)
-                vertices.clear()
-                vertices.append((event.xdata, event.ydata))
-                _redraw_poly(fig, ax)
-            else:
-                plt.close(fig)
+        elif event.button == 3:     # right-click → done 
+            plt.close(fig)
 
     fig.canvas.mpl_connect("button_press_event", _onclick)
     plt.show(block=True)
@@ -424,6 +451,7 @@ def collect_from_folder(folder: str, output_dir: str):
     if not files:
         warn("No image files found in the folder.")
         return None
+    random.shuffle(files)
     dim(f"Found {len(files)} images in folder.")
 
     cursor = [0]
@@ -452,9 +480,9 @@ def collect_from_folder(folder: str, output_dir: str):
         f.write(folder)
 
     steps = [
-        ("target", True, "Image 1 — Target example"),
-        ("anti_target", True, "Image 2 — Anti-target example"),
-        ("result", False, "Image 3 — Result image"),
+        ("result", False, "Image 1 — Result image"),
+        ("target", True, "Image 2 — Target example"),
+        ("anti_target", True, "Image 3 — Anti-target example"),
     ]
 
     for stem, zero_outside, title in steps:
@@ -493,7 +521,7 @@ def choose_from_list(prompt: str, max_items: int):
                 return n - 1
         print("Invalid choice. Enter number, 'c' to enter a custom URL, 'f' to enter a folder, or 'q' to quit.")
 
-def get_source():
+def get_source(links):
     max_show = 0
     if links:
         print("\nLinks found on this site:")
@@ -518,6 +546,7 @@ def get_source():
         is_url = False
     else:
         next_target = links[sel][1]
+        is_url = False
 
 
     if not next_target:
@@ -530,8 +559,8 @@ if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     os.makedirs(output_dir, exist_ok=True)
 
-    links = []
-    current_target, is_url = get_source()
+    links = [['', x] for x in get_subfolders("data_source")]
+    current_target, is_url = get_source(links)
 
     while True:
         if is_url:
@@ -547,6 +576,7 @@ if __name__ == "__main__":
 
 
 
-        current_target, is_url = get_source()
+        links = [['', x] for x in get_subfolders("data_source")]
+        current_target, is_url = get_source(links)
 
         time.sleep(SLEEP_BETWEEN_REQUESTS)
