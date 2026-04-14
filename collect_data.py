@@ -25,6 +25,7 @@ import sys
 import datetime
 import time
 
+import matplotlib
 from matplotlib import patches
 import numpy as np
 import requests
@@ -34,6 +35,8 @@ from matplotlib.path import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
+print(matplotlib.get_backend())
+matplotlib.use("Qt5Agg")
 
 # --- Colors ------------------------------------------------------------------
 
@@ -172,34 +175,40 @@ def draw_mask(
 ) -> tuple[np.ndarray, np.ndarray]:
     current = [image_array]
     vertices = []
-    paths = []
+    vertex_groups = []
 
     fig, ax = plt.subplots(figsize=(10, 8))
     im = ax.imshow(current[0])
     line, = ax.plot([], [], "r-o", linewidth=2, markersize=6)
+    lines = []
     fig.tight_layout()
 
     def _set_title():
         extra = "  |  Middle-click: next image" if get_replacement else ""
-        ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm{extra}")
+        ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm |  Middle-click: next image | Ctrl + Right-Click: new polygon")
 
     _set_title()
 
-    def _redraw_poly():
+    def _redraw_poly(fig, ax):
         if not vertices:
             line.set_data([], [])
-            fig.canvas.draw_idle()
         else:
             xs = [v[0] for v in vertices] + [vertices[0][0]]
             ys = [v[1] for v in vertices] + [vertices[0][1]]
             line.set_data(xs, ys)
-            fig.canvas.draw_idle()
 
-        for path in paths:
-            patch = patches.PathPatch(path, facecolor='none', edgecolor='red', lw=2)
-            fig, ax = plt.subplots()
-            ax.add_patch(patch)
-            ax.autoscale_view()
+        for i, vertex_group in enumerate(vertex_groups):
+            curr_line = None
+            if i < len(lines):
+                curr_line = lines[i]
+            else:
+                curr_line, = ax.plot([], [], "r-o", linewidth=2, markersize=6)
+                lines.append(curr_line)
+            xs = [v[0] for v in vertex_group] + [vertex_group[0][0]]
+            ys = [v[1] for v in vertex_group] + [vertex_group[0][1]]
+            curr_line.set_data(xs, ys)
+
+        fig.canvas.draw_idle()
 
 
 
@@ -215,7 +224,7 @@ def draw_mask(
         # matplotlib button: 1 left, 2 middle, 3 right
         if event.button == 1:       # left-click → add vertex
             vertices.append((event.xdata, event.ydata))
-            _redraw_poly()
+            _redraw_poly(fig, ax)
         elif event.button == 2:     # middle-click → swap image
             if get_replacement is None:
                 return
@@ -231,24 +240,33 @@ def draw_mask(
                 fig.canvas.draw_idle()
         elif event.button == 3:     # right-click → done or new poly
             if ctrl or cmd:
-                path = Path(vertices)
-                paths.append(path)
+                if len(vertices) > 0:
+                    new_group = vertices.copy()
+                    vertex_groups.append(new_group)
                 vertices.clear()
             else:
                 plt.close(fig)
 
     fig.canvas.mpl_connect("button_press_event", _onclick)
-    plt.show()
+    plt.show(block=True)
 
     h, w = current[0].shape[:2]
-    if len(vertices) < 3:
+    if len(vertices) < 3 and len(vertex_groups) == 0:
         warn("  (fewer than 3 vertices — using full image as mask)")
         return current[0], np.zeros((h, w), dtype=np.uint8)
+    else:
+        new_group = vertices.copy()
+        vertex_groups.append(new_group)
 
-    path = Path(vertices)
     y_idx, x_idx = np.mgrid[:h, :w]
-    points = np.column_stack([x_idx.ravel(), y_idx.ravel()])
-    mask = path.contains_points(points).reshape(h, w).astype(np.uint8)
+    points = np.column_stack([x_idx.ravel(), y_idx.ravel()])   # (x,y) points
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for group in vertex_groups:
+        path = Path(group)   # group must be sequence of (x,y)
+        inside = path.contains_points(points).reshape(h, w)
+        mask |= inside
+
     return current[0], mask
 
 

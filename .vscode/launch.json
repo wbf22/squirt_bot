@@ -6,16 +6,6 @@
     "configurations": [
 
         {
-            "name": "Collect Images",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "collect_images.py",
-            "console": "integratedTerminal",
-            "args": [
-                "cars"
-            ]
-        },
-        {
             "name": "Collect Data",
             "type": "debugpy",
             "request": "launch",
