@@ -210,8 +210,6 @@ def draw_mask(
 
         fig.canvas.draw_idle()
 
-
-
     def _onclick(event):
         if event.inaxes != ax:
             return
@@ -244,6 +242,8 @@ def draw_mask(
                     new_group = vertices.copy()
                     vertex_groups.append(new_group)
                 vertices.clear()
+                vertices.append((event.xdata, event.ydata))
+                _redraw_poly(fig, ax)
             else:
                 plt.close(fig)
 
