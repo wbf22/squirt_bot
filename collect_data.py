@@ -438,7 +438,6 @@ def collect_from_url(start_url: str, output_dir: str):
     links_sorted = sorted(links, key=lambda t: random.randint(0,1))
     return sample_dir, links_sorted
 
-
 def collect_from_folder(folder: str, output_dir: str):
     header(f"Starting from folder: {folder}")
     if not os.path.exists(folder) or not os.path.isdir(folder):
@@ -475,15 +474,18 @@ def collect_from_folder(folder: str, output_dir: str):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = os.path.basename(os.path.normpath(folder)).replace(".", "_")
     sample_dir = os.path.join(output_dir, f"{safe_name}_{timestamp}")
-    os.makedirs(sample_dir, exist_ok=True)
-    with open(os.path.join(sample_dir, "source_folder.txt"), "w") as f:
-        f.write(folder)
 
-    steps = [
-        ("result", False, "Image 1 — Result image"),
-        ("target", True, "Image 2 — Target example"),
-        ("anti_target", True, "Image 3 — Anti-target example"),
-    ]
+
+    result_step = ("result", False, "Image 1 — Result image")
+    target_step = ("target", True, "Image 2 — Target example")
+    anti_target_step = ("anti_target", True, "Image 3 — Anti-target example")
+    steps = [result_step, target_step, anti_target_step] if RESULT_FISRT else [target_step, result_step, anti_target_step]
+
+    result = None
+    result_mask = None
+    target = None
+    anti_target = None
+    
 
     for stem, zero_outside, title in steps:
         img = next_image()
@@ -496,12 +498,29 @@ def collect_from_folder(folder: str, output_dir: str):
         if zero_outside:
             out = final_fixed.copy()
             out[mask_fixed == 0] = 0
-            Image.fromarray(out).save(os.path.join(sample_dir, f"{stem}.jpg"))
-            success(f"  Saved {stem}.jpg")
+            if stem == "target":
+                target = Image.fromarray(out)
+            else:
+                anti_target = Image.fromarray(out)
+            success(f"  Captured {stem}.jpg")
         else:
-            Image.fromarray(final_fixed).save(os.path.join(sample_dir, f"{stem}.jpg"))
-            Image.fromarray((mask_fixed * 255).astype(np.uint8)).save(os.path.join(sample_dir, f"{stem}_mask.png"))
-            success(f"  Saved {stem}.jpg + {stem}_mask.png")
+            result = Image.fromarray(final_fixed)
+            result_mask = Image.fromarray((mask_fixed * 255).astype(np.uint8))
+            success(f"  Captured {stem}.jpg + {stem}_mask.png")
+
+
+    # save everything
+    os.makedirs(sample_dir, exist_ok=True)
+    with open(os.path.join(sample_dir, "source_folder.txt"), "w") as f:
+        f.write(folder)
+
+    result.save(os.path.join(sample_dir, f"{result_step[0]}.jpg"))
+    result_mask.save(os.path.join(sample_dir, f"{result_step[0]}_mask.png"))
+    target.save(os.path.join(sample_dir, f"{target_step[0]}.jpg"))
+    anti_target.save(os.path.join(sample_dir, f"{anti_target_step[0]}.jpg"))
+    success(f"  Saved Training Instance")
+
+
 
     # No links to return when collecting from a folder; return empty list
     return sample_dir, []
@@ -555,6 +574,8 @@ def get_source(links):
 
     return next_target, is_url
 
+
+RESULT_FISRT = False
 if __name__ == "__main__":
     output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
     os.makedirs(output_dir, exist_ok=True)
