@@ -21,11 +21,13 @@ Requirements:
 import io
 import os
 import pathlib
+from pathlib import Path
 import random
 import sys
 import datetime
 import time
 from typing import List, Union
+import argparse
 
 import matplotlib
 from matplotlib import patches
@@ -37,8 +39,9 @@ from matplotlib.path import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
-print(matplotlib.get_backend())
-matplotlib.use("Qt5Agg")
+if sys.platform.startswith("linux"):
+    print(matplotlib.get_backend())
+    matplotlib.use("Qt5Agg")
 
 # --- Colors ------------------------------------------------------------------
 
@@ -210,13 +213,15 @@ def draw_mask(
     vertices = []
     vertex_groups = []
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(15, 11), dpi=100)
     im = ax.imshow(current[0])
     line, = ax.plot([], [], "r-o", linewidth=2, markersize=6)
     lines = []
-    extra = "  |  Middle-click: next image" if get_replacement else ""
-    ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm |  Middle-click: next image | Ctrl + Right-Click: new polygon")
-    fig.tight_layout()
+    if LAP_TOP_MODE:
+        ax.set_title(f"{title}\nClick: add vertex | 1 + Click: new polygon |  2 + Click: confirm |  3 + Left Click : next image ")
+    else:
+        ax.set_title(f"{title}\nLeft-click: add vertex  |  Right-click: confirm |  Middle-click: next image | Ctrl + Left-Click: new polygon")
+    fig.tight_layout(rect=[0, 0, 1, 0.95]) 
 
 
     def _redraw_poly(fig, ax):
@@ -249,29 +254,44 @@ def draw_mask(
         ctrl = ("ctrl" in key) or ("control" in key)
         cmd = ("cmd" in key) or ("meta" in key)
 
+        click = event.button == 1 and key == ""
+        new_polygon = event.button == 1 and (ctrl or cmd or key == "1")
+        done = event.button == 3 or key == "2"
+        swap_image = event.button == 2 or key == "3"
+
+        # print("click", key)
+        
         # matplotlib button: 1 left, 2 middle, 3 right
-        if event.button == 1:       # left-click → add vertex or new poly
-            if ctrl or cmd:
-                if len(vertices) > 0:
-                    new_group = vertices.copy()
-                    vertex_groups.append(new_group)
-                vertices.clear()
+        if click:       # left-click → add vertex or new poly
             vertices.append((event.xdata, event.ydata))
             _redraw_poly(fig, ax)
-        elif event.button == 2:     # middle-click → swap image
+        elif new_polygon:
+            if len(vertices) > 0:
+                new_group = vertices.copy()
+                vertex_groups.append(new_group)
+            vertices.clear()
+            vertices.append((event.xdata, event.ydata))
+            _redraw_poly(fig, ax)
+        elif swap_image:     # middle-click → swap image
             if get_replacement is None:
                 return
             new_img = get_replacement()
             if new_img is not None:
                 current[0] = new_img
-                vertices.clear()
                 im.set_data(new_img)
                 im.set_extent([-0.5, new_img.shape[1] - 0.5, new_img.shape[0] - 0.5, -0.5])
                 line.set_data([], [])
                 ax.relim()
                 ax.autoscale_view()
                 fig.canvas.draw_idle()
-        elif event.button == 3:     # right-click → done 
+
+                vertices.clear()
+                vertex_groups.clear()
+                while len(lines) > 0:
+                    other_line = lines.pop()
+                    other_line.remove()
+                _redraw_poly(fig, ax)
+        elif done:     # right-click → done 
             plt.close(fig)
 
     fig.canvas.mpl_connect("button_press_event", _onclick)
@@ -576,8 +596,17 @@ def get_source(links):
 
 
 RESULT_FISRT = False
+LAP_TOP_MODE = False
+
+
 if __name__ == "__main__":
-    output_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset"
+
+    p = argparse.ArgumentParser(description="Interactive data collection for TargetDetector training")
+    p.add_argument("-d", "--output_dir", nargs="?", default="dataset", help="Directory to save collected samples")
+    p.add_argument("-l", "--laptop_mode", action="store_true", help="Typical flow uses right and middle mouse click, for laptop mode these are replaced with different keys")
+    args = p.parse_args()
+    output_dir = args.output_dir
+    LAP_TOP_MODE = args.laptop_mode
     os.makedirs(output_dir, exist_ok=True)
 
     links = [['', x] for x in get_subfolders("data_source")]
@@ -594,7 +623,6 @@ if __name__ == "__main__":
             if res is not None:
                 sample_dir, links = res
                 print(f"Sample saved to: {sample_dir}")
-
 
 
         links = [['', x] for x in get_subfolders("data_source")]
